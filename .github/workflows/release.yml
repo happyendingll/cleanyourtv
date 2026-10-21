@@ -1,0 +1,71 @@
+name: Release Launcher
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (for example v2.5.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: launcher-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish launcher.apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        run: git check-ref-format "refs/tags/$RELEASE_TAG"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-34 build-tools;34.0.0
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests, lint and release build
+        working-directory: launcher
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon testReleaseUnitTest lintRelease assembleRelease
+
+      - name: Prepare launcher.apk
+        run: |
+          cp launcher/app/build/outputs/apk/release/app-release.apk launcher.apk
+          size=$(stat -c %s launcher.apk)
+          echo "release APK: $((size / 1024)) KB"
+          test "$size" -lt 450560 || { echo "APK is over 440 KB"; exit 1; }
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" launcher.apk --clobber
+          else
+            gh release create "$RELEASE_TAG" launcher.apk \
+              --verify-tag --title "Launcher $RELEASE_TAG" --generate-notes
+          fi
